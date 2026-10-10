@@ -1,0 +1,644 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Game Memancing</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; min-height: 100vh; display: flex; flex-direction: column; align-items: center;
+    justify-content: center; gap: 10px; background: #0f1b2d; color: #fff; font-family: system-ui, sans-serif; padding: 12px; }
+  #hud { display: flex; gap: 18px; font-weight: 700; font-size: 18px; }
+  canvas { user-select: none; -webkit-touch-callout: none; width: 100%; max-width: 800px; aspect-ratio: 16/9; border-radius: 14px; background: #87ceeb; touch-action: manipulation; cursor: pointer; }
+  #status { min-height: 26px; font-size: 18px; text-align: center; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
+  button { border: 0; border-radius: 12px; padding: 14px 24px; font-size: 18px; font-weight: 700; color: #fff; cursor: pointer; }
+  #act { background: #2888e6; min-width: 220px; }
+  #up { background: #6a4bd8; font-size: 15px; }
+  #dex { display: none; position: fixed; inset: 0; background: rgba(5,10,20,.93); overflow: auto; padding: 14px; z-index: 10; }
+  #dex.on { display: block; }
+  #dexBox { max-width: 900px; margin: auto; }
+  #dexHead { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+  #dexHead h2 { margin: 0; font-size: 22px; }
+  #dexHead button { background: #c0392b; padding: 10px 16px; font-size: 15px; }
+  #dexGrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 12px; }
+  .dcard { background: #15233b; border: 2px solid #334; border-radius: 12px; padding: 8px; display: flex; flex-direction: column; align-items: center; gap: 3px; text-align: center; }
+  .dcard canvas { width: 100%; height: auto; background: linear-gradient(#1f6fa8, #0c3f78); border-radius: 8px; }
+  .dcard small { color: #9fb0c8; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+</style>
+</head>
+<body>
+  <div id="hud">
+    <span>🪙 <span id="coins">0</span></span>
+    <span>🐟 <span id="caught">0</span></span>
+    <span>🎣 Lv <span id="lvl">0</span></span>
+  </div>
+  <canvas id="c" width="1600" height="900"></canvas>
+  <div id="status"></div>
+  <div class="row">
+    <button id="act">🎣 Lempar Pancing</button>
+    <button id="up"></button>
+    <button id="dexBtn" style="background:#0f8f7f"></button>
+    <button id="mute" style="background:#445566">🔊</button>
+  </div>
+
+<div id="dex"><div id="dexBox">
+  <div id="dexHead"><h2>📖 Koleksi Ikan <span id="dexCount"></span></h2><button id="dexClose">✕ Tutup</button></div>
+  <div id="dexGrid"></div>
+</div></div>
+
+<script>
+// ===================== DATA =====================
+const RARITY_COLORS = { Common: '#c8c8c8', Uncommon: '#5adc6e', Rare: '#509bff', Epic: '#be5aff', Legendary: '#ffbe28' };
+const RARITY_WEIGHTS = { Common: 60, Uncommon: 25, Rare: 10, Epic: 4, Legendary: 1 };
+const FISH = [
+  { name: 'Ikan Teri', rarity: 'Common', price: 5 },
+  { name: 'Ikan Mas', rarity: 'Common', price: 8 },
+  { name: 'Ikan Lele', rarity: 'Common', price: 10 },
+  { name: 'Ikan Nila', rarity: 'Uncommon', price: 20 },
+  { name: 'Ikan Gurame', rarity: 'Uncommon', price: 28 },
+  { name: 'Ikan Kakap', rarity: 'Rare', price: 60 },
+  { name: 'Ikan Tuna', rarity: 'Rare', price: 80 },
+  { name: 'Ikan Pari', rarity: 'Epic', price: 200 },
+  { name: 'Hiu Kecil', rarity: 'Epic', price: 260 },
+  { name: 'Ikan Naga Emas', rarity: 'Legendary', price: 1000 },
+];
+const JUNK = [
+  { name: 'Sepatu Bekas', price: 1 }, { name: 'Kaleng Karatan', price: 1 }, { name: 'Rumput Laut', price: 2 },
+];
+const JUNK_CHANCE = 0.08, MAX_LEVEL = 5;
+
+// ===================== STATE =====================
+const $ = id => document.getElementById(id);
+const cv = $('c'), ctx = cv.getContext('2d');
+const W = 800, H = 450, WATER = 250;
+const TIP = { x: 215, y: 205 }, TARGET = { x: 540, y: 272 };
+
+let save = { coins: 0, caught: 0, level: 0, dex: {} };
+try { Object.assign(save, JSON.parse(localStorage.getItem('fishing_save') || '{}')); } catch (e) {}
+function persist() { try { localStorage.setItem('fishing_save', JSON.stringify(save)); } catch (e) {} }
+
+let mode = 'idle';           // idle | casting | waiting | bite | jumping
+let tm = 0, clock = 0, castT = 0, waitFor = 0, jumpT = 0;
+let current = null;          // hasil tangkapan saat ini
+let ripples = [];
+let popup = { t: 0, text: '', color: '#fff' };
+
+const waitRange = () => (3 + Math.random() * 5) * (1 - 0.1 * save.level);
+const biteWindow = () => 1.3 + 0.25 * save.level;
+const upgradeCost = () => 50 * (save.level + 1) ** 2;
+
+// ===================== LOGIKA =====================
+function pickFish() {
+  if (Math.random() < JUNK_CHANCE) return { ...JUNK[Math.floor(Math.random() * JUNK.length)], junk: true };
+  let roll = Math.random() * Object.values(RARITY_WEIGHTS).reduce((a, b) => a + b, 0), chosen = 'Common';
+  for (const [r, w] of Object.entries(RARITY_WEIGHTS)) { roll -= w; if (roll <= 0) { chosen = r; break; } }
+  const pool = FISH.filter(f => f.rarity === chosen);
+  return pool[Math.floor(Math.random() * pool.length)];
+}
+
+function setStatus(t) { $('status').textContent = t; }
+
+function fail(msg) {
+  mode = 'idle'; tm = 0;
+  showPopup(msg, '#ff6e6e'); sfx(220, .35, 'sawtooth', .05, -120);
+  refreshUI();
+}
+
+function showPopup(text, color) { popup = { t: 3, text, color }; }
+
+function action() {
+  if (dexOpen) return;
+  if (mode === 'idle') {
+    mode = 'casting'; castT = 0; card.t = 0; sfx(450, .35, 'sawtooth', .03, -250);
+    setStatus('Melempar...');
+  } else if (mode === 'waiting') {
+    fail('Terlalu cepat! Ikan kabur.');
+  } else if (mode === 'bite') {
+    startFight();
+  }
+  refreshUI();
+}
+
+function buyUpgrade() {
+  if (save.level >= MAX_LEVEL || save.coins < upgradeCost()) return;
+  save.coins -= upgradeCost();
+  save.level++; jingle([523, 784, 1047]);
+  persist();
+  refreshUI();
+}
+
+function refreshUI() {
+  $('coins').textContent = save.coins;
+  $('caught').textContent = save.caught;
+  $('lvl').textContent = save.level;
+  $('dexBtn').textContent = '📖 Koleksi (' + FISH.filter(f => save.dex[f.name]).length + '/' + FISH.length + ')';
+  const b = $('act');
+  if (mode === 'idle') { b.textContent = '🎣 Lempar Pancing'; b.style.background = '#2888e6'; setStatus('Klik, tap, atau tekan Spasi/E untuk memancing'); }
+  else if (mode === 'casting' || mode === 'waiting') { b.textContent = 'Menunggu ikan...'; b.style.background = '#78787f'; if (mode === 'waiting') setStatus('Tunggu ikan menyambar... jangan tarik terlalu cepat!'); }
+  else if (mode === 'bite') { b.textContent = '❗ TARIK!!'; b.style.background = '#e63c3c'; setStatus('Ikan menyambar! Tarik sekarang!'); }
+  else if (mode === 'fight') { b.textContent = '🎣 TAHAN untuk menarik'; b.style.background = '#e08a1e'; setStatus('Tahan klik/tap/Spasi agar bar hijau naik. Jaga ikan tetap di dalamnya!'); }
+  else { b.textContent = 'Menarik...'; b.style.background = '#78787f'; }
+  b.disabled = mode === 'casting' || mode === 'jumping';
+  const up = $('up');
+  if (save.level >= MAX_LEVEL) { up.textContent = '⭐ Pancing Level Maksimal'; up.disabled = true; }
+  else { up.textContent = `⬆ Upgrade Pancing (${upgradeCost()} koin)`; up.disabled = save.coins < upgradeCost(); }
+}
+
+// ===================== EFEK, SUARA & DUNIA =====================
+let AC, muted = false, shake = 0, flash = 0, ps = [];
+const rnd = (a, b) => a + Math.random() * (b - a);
+
+function sfx(f, d = .15, type = 'sine', v = .08, slide = 0) {
+  if (muted) return;
+  try {
+    AC = AC || new (window.AudioContext || window.webkitAudioContext)();
+    const o = AC.createOscillator(), g = AC.createGain(), t = AC.currentTime;
+    o.type = type; o.frequency.setValueAtTime(f, t);
+    if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(40, f + slide), t + d);
+    g.gain.setValueAtTime(v, t); g.gain.exponentialRampToValueAtTime(.001, t + d);
+    o.connect(g); g.connect(AC.destination); o.start(); o.stop(t + d);
+  } catch (e) {}
+}
+function jingle(notes) { notes.forEach((n, i) => setTimeout(() => sfx(n, .25, 'triangle', .07), i * 90)); }
+
+function spawn(x, y, n, color, kind) {
+  for (let i = 0; i < n; i++) {
+    const splash = kind === 'splash';
+    const a = splash ? -Math.PI * (.15 + Math.random() * .7) : Math.random() * 7;
+    const s = splash ? rnd(120, 320) : rnd(40, 200);
+    ps.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: 0, max: rnd(.6, 1.2), c: color, r: rnd(1.5, 4), g: splash ? 700 : 40, star: kind === 'spark' });
+  }
+}
+
+const clouds = Array.from({ length: 5 }, () => ({ x: rnd(0, W), y: rnd(25, 120), s: rnd(.6, 1.3), v: rnd(4, 12) }));
+const birds = Array.from({ length: 4 }, (_, i) => ({ x: rnd(0, W), y: rnd(40, 130), v: rnd(30, 55), ph: i * 2 }));
+const stars = Array.from({ length: 60 }, () => ({ x: rnd(0, W), y: rnd(0, WATER - 40), r: rnd(.8, 2), ph: rnd(0, 6) }));
+const swimmers = Array.from({ length: 7 }, (_, i) => { const y = rnd(WATER + 40, H - 30); return { x: rnd(0, W), y, y0: y, v: (Math.random() < .5 ? -1 : 1) * rnd(20, 50), s: i ? rnd(.7, 1.2) : 1.3, dir: 1, ph: rnd(0, 6) }; });
+const bubbles = Array.from({ length: 16 }, () => ({ x: rnd(0, W), y: rnd(WATER, H), r: rnd(1.5, 4), v: rnd(15, 40), ph: rnd(0, 6) }));
+
+// palet siang -> senja -> malam -> fajar
+const KF = [
+  { t: [95, 180, 238], b: [191, 230, 251], w1: [47, 143, 208], w2: [12, 63, 120], n: 0 },
+  { t: [250, 130, 90], b: [255, 208, 140], w1: [190, 105, 125], w2: [45, 40, 100], n: .3 },
+  { t: [8, 14, 44], b: [30, 42, 92], w1: [20, 50, 100], w2: [5, 14, 44], n: .85 },
+  { t: [255, 165, 130], b: [255, 225, 180], w1: [110, 150, 200], w2: [30, 60, 110], n: .25 },
+];
+const CYCLE = 120; // detik untuk satu hari penuh
+function pal(p) {
+  const f = p * KF.length, i = Math.floor(f) % KF.length, k = f - Math.floor(f), A = KF[i], B = KF[(i + 1) % KF.length], o = {};
+  for (const key of ['t', 'b', 'w1', 'w2']) o[key] = `rgb(${A[key].map((v, j) => Math.round(v + (B[key][j] - v) * k)).join(',')})`;
+  o.n = A.n + (B.n - A.n) * k;
+  return o;
+}
+
+// ===================== UPDATE =====================
+function update(dt) {
+  clock += dt; tm += dt;
+  if (mode === 'casting') {
+    castT += dt / 0.5;
+    if (castT >= 1) {
+      castT = 1; mode = 'waiting'; tm = 0; waitFor = waitRange(); ripples.push({ t: 0 });
+      spawn(TARGET.x, TARGET.y, 14, '#cfeeff', 'splash'); sfx(200, .18, 'triangle', .07, -120); refreshUI();
+    }
+  } else if (mode === 'waiting') {
+    if (tm >= waitFor) {
+      mode = 'bite'; tm = 0; ripples.push({ t: 0 }); shake = 5;
+      spawn(TARGET.x, TARGET.y, 8, '#cfeeff', 'splash');
+      sfx(880, .1, 'square', .04); setTimeout(() => sfx(1100, .12, 'square', .04), 110); refreshUI();
+    }
+  } else if (mode === 'bite') {
+    if (tm > biteWindow()) fail('Terlambat! Ikannya kabur.');
+  } else if (mode === 'fight') {
+    updateFight(dt);
+  } else if (mode === 'jumping') {
+    jumpT += dt / 0.9;
+    if (jumpT >= 1) {
+      mode = 'idle';
+      if (current.junk) { showPopup(`Kamu dapat ${current.name}... (+${current.price} koin)`, '#bbbbbb'); sfx(180, .25, 'sawtooth', .04, -60); }
+      else {
+        const k = ['Common', 'Uncommon', 'Rare', 'Epic', 'Legendary'].indexOf(current.rarity), c = RARITY_COLORS[current.rarity];
+        showPopup(`${current.name}! (${current.rarity}, +${current.price} koin)`, c);
+        card = { t: 3.6, fish: current, isNew: newCatch };
+        if (newCatch) { flash = Math.max(flash, .3); setTimeout(() => sfx(1568, .3, 'triangle', .07), 450); }
+        spawn(TIP.x, TIP.y + 10, 8 + k * 14, c, 'spark');
+        if (k >= 3) { flash = k === 4 ? 1 : .5; shake = 8; }
+        jingle([523, 659, 784, 1047, 1319, 1568, 2093].slice(0, [2, 3, 4, 5, 7][k]));
+      }
+      refreshUI();
+    }
+  }
+  ripples.forEach(r => r.t += dt); ripples = ripples.filter(r => r.t < 1.2);
+  if (popup.t > 0) popup.t -= dt; if (card.t > 0) card.t -= dt;
+  shake = Math.max(0, shake - dt * 20); flash = Math.max(0, flash - dt * 1.2);
+  ps.forEach(q => { q.life += dt; q.vy += q.g * dt; q.x += q.vx * dt; q.y += q.vy * dt; }); ps = ps.filter(q => q.life < q.max);
+  clouds.forEach(c => { c.x += c.v * dt; if (c.x > W + 100) c.x = -120; });
+  birds.forEach(b => { b.x += b.v * dt; b.y += Math.sin(clock + b.ph) * .2; if (b.x > W + 30) { b.x = -30; b.y = rnd(40, 130); } });
+  bubbles.forEach(b => { b.y -= b.v * dt; if (b.y < WATER + 4) { b.y = H; b.x = rnd(0, W); } });
+  swimmers.forEach((f, i) => {
+    if (i === 0 && (mode === 'waiting' || mode === 'bite' || mode === 'fight')) {
+      const tx = TARGET.x - 30, ty = TARGET.y + 42 + (mode === 'bite' || mode === 'fight' ? Math.sin(clock * 25) * 6 : 0);
+      f.dir = Math.abs(tx - f.x) > 4 ? (tx > f.x ? 1 : -1) : 1;
+      f.x += (tx - f.x) * dt * 1.4; f.y += (ty - f.y) * dt * 1.4;
+    } else {
+      f.dir = f.v > 0 ? 1 : -1; f.x += f.v * dt;
+      if (f.x > W + 40) f.x = -40; if (f.x < -40) f.x = W + 40;
+      f.y += (f.y0 + Math.sin(clock + f.ph) * 10 - f.y) * dt * .8;
+    }
+  });
+}
+
+// ===================== GAMBAR =====================
+function tip() {
+  let x = TIP.x, y = TIP.y;
+  if (mode === 'casting') { const s = Math.sin(Math.PI * castT); x -= 32 * s; y -= 18 * s; }
+  else if (mode === 'bite' || mode === 'fight') { x += Math.sin(clock * 40) * 1.5; y += 7; }
+  else if (mode === 'jumping') y += 12 * Math.sin(Math.PI * jumpT);
+  else if (mode === 'waiting') y += Math.sin(clock * 2) * 1.5;
+  return { x, y };
+}
+function bobberPos() {
+  if (mode === 'casting') {
+    const T = tip();
+    return { x: T.x + (TARGET.x - T.x) * castT, y: T.y + (TARGET.y - T.y) * castT - 130 * Math.sin(Math.PI * castT) };
+  }
+  if (mode === 'bite') return { x: TARGET.x, y: TARGET.y + 8 + Math.sin(clock * 35) * 4 };
+  if (mode === 'fight') return { x: TARGET.x + Math.sin(clock * 9) * 6, y: TARGET.y + 4 + Math.sin(clock * 22) * 3 };
+  return { x: TARGET.x, y: TARGET.y + Math.sin(clock * 3) * 2 };
+}
+function glowDisc(x, y, r, rgb) {
+  const g = ctx.createRadialGradient(x, y, r * .5, x, y, r * 3.2);
+  g.addColorStop(0, `rgba(${rgb},.55)`); g.addColorStop(1, `rgba(${rgb},0)`);
+  ctx.fillStyle = g; ctx.fillRect(x - r * 3.2, y - r * 3.2, r * 6.4, r * 6.4);
+  ctx.fillStyle = `rgb(${rgb})`; ctx.beginPath(); ctx.arc(x, y, r, 0, 7); ctx.fill();
+}
+function cloud(x, y, s) {
+  ctx.beginPath();
+  [[0, 0, 22], [24, -8, 26], [50, 0, 20], [26, 6, 26]].forEach(([dx, dy, r]) => { ctx.moveTo(x + (dx + r) * s, y + dy * s); ctx.arc(x + dx * s, y + dy * s, r * s, 0, 7); });
+  ctx.fill();
+}
+function hills(col, amp, freq, off, lift) {
+  ctx.fillStyle = col; ctx.beginPath(); ctx.moveTo(0, WATER);
+  for (let x = 0; x <= W; x += 10) ctx.lineTo(x, WATER - lift - amp * (.5 + .5 * Math.sin(x * freq + off) * Math.cos(x * freq * .37)));
+  ctx.lineTo(W, WATER); ctx.fill();
+}
+
+function draw() {
+  ctx.setTransform(2, 0, 0, 2, 0, 0);
+  const p = (clock / CYCLE) % 1, P = pal(p), n = P.n, a = p * Math.PI * 2;
+  if (shake > 0) ctx.translate(rnd(-shake, shake) / 2, rnd(-shake, shake) / 2);
+
+  // langit, bintang, matahari, bulan
+  let g = ctx.createLinearGradient(0, 0, 0, WATER); g.addColorStop(0, P.t); g.addColorStop(1, P.b);
+  ctx.fillStyle = g; ctx.fillRect(-10, -10, W + 20, WATER + 10);
+  const sa = Math.max(0, (n - .3) * 1.8);
+  if (sa > 0) stars.forEach(s => { ctx.globalAlpha = sa * (.5 + .5 * Math.sin(clock * 2 + s.ph)); ctx.fillStyle = '#fff'; ctx.fillRect(s.x, s.y, s.r, s.r); });
+  ctx.globalAlpha = 1;
+  const sun = { x: W / 2 + Math.sin(a) * 340, y: WATER - 40 - Math.cos(a) * 190 };
+  const moon = { x: W / 2 - Math.sin(a) * 340, y: WATER - 40 + Math.cos(a) * 190 };
+  glowDisc(sun.x, sun.y, 34, '255,240,170'); glowDisc(moon.x, moon.y, 24, '230,235,255');
+
+  // awan, burung, bukit, perahu layar
+  ctx.fillStyle = `rgba(255,255,255,${.85 - n * .6})`; clouds.forEach(c => cloud(c.x, c.y, c.s));
+  ctx.strokeStyle = `rgba(30,30,50,${1 - n})`; ctx.lineWidth = 2;
+  birds.forEach(b => { const f = Math.sin(clock * 9 + b.ph) * 6; ctx.beginPath(); ctx.moveTo(b.x - 11, b.y + f); ctx.quadraticCurveTo(b.x - 5, b.y - 4, b.x, b.y); ctx.quadraticCurveTo(b.x + 5, b.y - 4, b.x + 11, b.y + f); ctx.stroke(); });
+  hills('#5a9a90', 50, .012, 0, 14); hills('#2f6b62', 32, .02, 2, 4);
+  const bx = (clock * 8) % (W + 160) - 80;
+  ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.moveTo(bx, WATER - 6); ctx.lineTo(bx, WATER - 32); ctx.lineTo(bx + 16, WATER - 6); ctx.fill();
+  ctx.fillStyle = '#6b3b1d'; ctx.fillRect(bx - 8, WATER - 6, 28, 5);
+
+  // air
+  g = ctx.createLinearGradient(0, WATER, 0, H); g.addColorStop(0, P.w1); g.addColorStop(1, P.w2);
+  ctx.fillStyle = g; ctx.fillRect(-10, WATER, W + 20, H - WATER + 10);
+  const lt = sun.y < WATER ? sun : moon;
+  if (lt.y < WATER) for (let i = 0; i < 12; i++) { ctx.fillStyle = `rgba(255,250,220,${.32 - i * .02})`; const w = 36 - i * 2 + Math.sin(clock * 3 + i) * 8; ctx.fillRect(lt.x - w / 2, WATER + 5 + i * 13, w, 3); }
+  swimmers.forEach((f, i) => {
+    ctx.save(); ctx.translate(f.x, f.y); ctx.scale(f.dir * f.s, f.s);
+    ctx.fillStyle = i === 0 ? 'rgba(255,200,80,.6)' : 'rgba(255,255,255,.22)';
+    ctx.beginPath(); ctx.ellipse(0, 0, 16, 8, 0, 0, 7); ctx.fill();
+    const w = Math.sin(clock * 8 + f.ph) * 5;
+    ctx.beginPath(); ctx.moveTo(-14, 0); ctx.lineTo(-26, -8 + w); ctx.lineTo(-26, 8 + w); ctx.fill(); ctx.restore();
+  });
+  ctx.strokeStyle = 'rgba(255,255,255,.35)'; ctx.lineWidth = 1;
+  bubbles.forEach(b => { ctx.beginPath(); ctx.arc(b.x + Math.sin(clock * 2 + b.ph) * 4, b.y, b.r, 0, 7); ctx.stroke(); });
+  ctx.strokeStyle = 'rgba(255,255,255,.22)'; ctx.lineWidth = 2;
+  for (let row = 0; row < 5; row++) {
+    ctx.beginPath();
+    for (let x = 0; x <= W; x += 10) { const y = WATER + 14 + row * 34 + Math.sin(x / 40 + clock * 1.5 + row) * 4; x ? ctx.lineTo(x, y) : ctx.moveTo(x, y); }
+    ctx.stroke();
+  }
+
+  // dermaga
+  ctx.fillStyle = '#7a4d27'; ctx.fillRect(-10, 240, 260, 18);
+  ctx.fillStyle = '#5c3a1c'; for (let x = 10; x < 250; x += 28) ctx.fillRect(x, 240, 2, 18);
+  ctx.fillRect(30, 258, 14, 80); ctx.fillRect(200, 258, 14, 80);
+
+  // pemancing
+  const T = tip(), br = Math.sin(clock * 2);
+  ctx.fillStyle = '#d94f3d'; ctx.fillRect(135, 186 + br, 30, 54 - br);
+  ctx.fillStyle = '#e8b27a'; ctx.beginPath(); ctx.arc(150, 170 + br, 16, 0, 7); ctx.fill();
+  ctx.fillStyle = '#e6c25a'; ctx.beginPath(); ctx.ellipse(150, 162 + br, 28, 6, 0, 0, 7); ctx.fill();
+  ctx.beginPath(); ctx.arc(150, 160 + br, 14, Math.PI, 0); ctx.fill();
+  ctx.fillStyle = '#222'; ctx.fillRect(157, 169 + br, 3, 3);
+  ctx.strokeStyle = '#e8b27a'; ctx.lineWidth = 6; ctx.beginPath(); ctx.moveTo(155, 195 + br); ctx.lineTo(172, 208); ctx.stroke();
+  const bend = (mode === 'bite' || mode === 'fight' || mode === 'jumping') ? 16 : 0;
+  ctx.strokeStyle = '#4b2e14'; ctx.lineWidth = 4; ctx.beginPath(); ctx.moveTo(168, 212);
+  ctx.quadraticCurveTo((168 + T.x) / 2, (212 + T.y) / 2 - 20 + bend, T.x, T.y); ctx.stroke();
+
+  // riak, tali, pelampung, ikan
+  ctx.lineWidth = 2;
+  ripples.forEach(r => { ctx.strokeStyle = `rgba(255,255,255,${1 - r.t / 1.2})`; ctx.beginPath(); ctx.ellipse(TARGET.x, TARGET.y + 6, 10 + r.t * 50, 4 + r.t * 14, 0, 0, 7); ctx.stroke(); });
+  ctx.strokeStyle = 'rgba(255,255,255,.85)'; ctx.lineWidth = 1.5;
+  if (mode === 'idle') { ctx.beginPath(); ctx.moveTo(T.x, T.y); ctx.lineTo(T.x + 4, T.y + 40); ctx.stroke(); }
+  else if (mode === 'jumping') {
+    const fx = TARGET.x + (TIP.x - TARGET.x) * jumpT, fy = TARGET.y + (TIP.y + 10 - TARGET.y) * jumpT - 140 * Math.sin(Math.PI * jumpT);
+    ctx.beginPath(); ctx.moveTo(T.x, T.y); ctx.lineTo(fx, fy); ctx.stroke();
+    ctx.save(); ctx.translate(fx, fy); ctx.rotate(jumpT * 6);
+    ctx.shadowColor = current.junk ? '#999' : RARITY_COLORS[current.rarity]; ctx.shadowBlur = 20;
+    drawFish(ctx, current.name, 58, clock); ctx.restore();
+  } else {
+    const b = bobberPos();
+    ctx.beginPath(); ctx.moveTo(T.x, T.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(b.x, b.y, 8, Math.PI, 0); ctx.fill();
+    ctx.fillStyle = '#e63c3c'; ctx.beginPath(); ctx.arc(b.x, b.y, 8, 0, Math.PI); ctx.fill();
+    if (mode === 'bite') {
+      ctx.fillStyle = '#ffdd33'; ctx.font = 'bold 54px sans-serif'; ctx.textAlign = 'center'; ctx.strokeStyle = '#000'; ctx.lineWidth = 4;
+      const by = b.y - 30 - Math.abs(Math.sin(clock * 12)) * 8; ctx.strokeText('!', b.x, by); ctx.fillText('!', b.x, by);
+    }
+  }
+
+  // malam: gelapkan adegan, lalu lentera menyala
+  if (n > 0) { ctx.fillStyle = `rgba(0,10,50,${n * .4})`; ctx.fillRect(-10, -10, W + 20, H + 20); }
+  ctx.fillStyle = '#333'; ctx.fillRect(69, 205, 3, 35);
+  ctx.fillStyle = '#ffd36b'; ctx.fillRect(62, 194, 18, 14);
+  const lg = ctx.createRadialGradient(71, 201, 4, 71, 201, 110);
+  lg.addColorStop(0, `rgba(255,200,100,${.15 + .6 * n})`); lg.addColorStop(1, 'rgba(255,200,100,0)');
+  ctx.fillStyle = lg; ctx.fillRect(-40, 90, 220, 220);
+
+  // partikel
+  ps.forEach(q => {
+    ctx.globalAlpha = 1 - q.life / q.max; ctx.fillStyle = q.c;
+    if (q.star) { ctx.fillRect(q.x - q.r * 1.5, q.y - .5, q.r * 3, 1); ctx.fillRect(q.x - .5, q.y - q.r * 1.5, 1, q.r * 3); }
+    ctx.beginPath(); ctx.arc(q.x, q.y, q.r, 0, 7); ctx.fill();
+  });
+  ctx.globalAlpha = 1;
+
+  // vinyet & kilat
+  const vg = ctx.createRadialGradient(W / 2, H / 2, H * .45, W / 2, H / 2, H * .95);
+  vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(0,0,0,.35)');
+  ctx.fillStyle = vg; ctx.fillRect(-10, -10, W + 20, H + 20);
+  if (flash > 0) { ctx.fillStyle = `rgba(255,255,255,${flash * .5})`; ctx.fillRect(-10, -10, W + 20, H + 20); }
+
+  if (mode === 'fight') drawFight();
+  if (card.t > 0) drawCard();
+
+  // teks hasil
+  if (popup.t > 0) {
+    const age = 3 - popup.t, sc = 1 + Math.max(0, .3 - age) * 2;
+    ctx.save(); ctx.translate(W / 2, 70); ctx.scale(sc, sc); ctx.globalAlpha = Math.min(1, popup.t / .8);
+    ctx.font = 'bold 28px sans-serif'; ctx.textAlign = 'center'; ctx.lineWidth = 5; ctx.strokeStyle = 'rgba(0,0,0,.6)';
+    ctx.strokeText(popup.text, 0, 0); ctx.fillStyle = popup.color; ctx.fillText(popup.text, 0, 0); ctx.restore();
+  }
+}
+
+// ===================== ART IKAN =====================
+let newCatch = false, card = { t: 0 }, dexOpen = false;
+const ART = {
+  'Ikan Teri':      { c: '#b8c9d9', b: '#eef4f9', f: '#8fa6ba', L: 44, H: 13, tail: 'fork', pat: 'line', pc: '#7f9bb5' },
+  'Ikan Mas':       { c: '#ff8c1a', b: '#ffc266', f: '#ff6a00', L: 44, H: 30, tail: 'fan', pat: 'scales', pc: '#d65f00' },
+  'Ikan Lele':      { c: '#5c5648', b: '#a39a85', f: '#3f3a30', L: 56, H: 20, tail: 'fan', pat: 'spots', pc: '#2e2a22', x: 'whisker' },
+  'Ikan Nila':      { c: '#7d8f6b', b: '#d6dcc4', f: '#5e6e4f', L: 50, H: 28, tail: 'fan', pat: 'stripes', pc: '#4f5e42' },
+  'Ikan Gurame':    { c: '#b98a4a', b: '#e6cd9e', f: '#8f6430', L: 48, H: 34, tail: 'fan', pat: 'stripes', pc: '#8f6430', x: 'feeler' },
+  'Ikan Kakap':     { c: '#e0524d', b: '#f7c5b5', f: '#c0392f', L: 56, H: 30, tail: 'fork', pat: 'none', x: 'spiky' },
+  'Ikan Tuna':      { c: '#2f5f9e', b: '#dfe9f3', f: '#24467a', L: 62, H: 26, tail: 'fork', pat: 'line', pc: '#f2c94c', x: 'finlets' },
+  'Ikan Pari':      { c: '#6f7f95', b: '#dfe5ee', f: '#55657a', x: 'ray' },
+  'Hiu Kecil':      { c: '#7b8a99', b: '#eef2f6', f: '#5c6b7a', L: 70, H: 26, tail: 'fork', pat: 'none', x: 'shark' },
+  'Ikan Naga Emas': { c: '#ffc61a', b: '#fff0a6', f: '#ff9d00', L: 62, H: 30, tail: 'fan', pat: 'scales', pc: '#d98e00', x: 'dragon' },
+  'Sepatu Bekas': { x: 'shoe' }, 'Kaleng Karatan': { x: 'can' }, 'Rumput Laut': { x: 'weed' },
+};
+
+// Menggambar ikan (menghadap kanan, berpusat di 0,0). size = panjang badan acuan dalam piksel.
+function drawFish(c, name, size, t = 0) {
+  const a = ART[name]; if (!a) return;
+  c.save(); c.scale(size / 60, size / 60); c.lineJoin = 'round'; c.lineCap = 'round';
+  const w = Math.sin(t * 8) * 3;
+  const tri = (x1, y1, x2, y2, x3, y3) => { c.beginPath(); c.moveTo(x1, y1); c.lineTo(x2, y2); c.lineTo(x3, y3); c.closePath(); c.fill(); };
+
+  if (a.x === 'shoe') {
+    c.fillStyle = '#7a5230'; c.beginPath(); c.moveTo(-22, -12); c.lineTo(-8, -12); c.lineTo(-4, 0); c.lineTo(20, 5); c.quadraticCurveTo(29, 7, 27, 14); c.lineTo(-22, 14); c.closePath(); c.fill();
+    c.fillStyle = '#3b2a18'; c.fillRect(-22, 11, 49, 5);
+    c.strokeStyle = '#d9c9a8'; c.lineWidth = 1.5; for (let i = 0; i < 3; i++) { c.beginPath(); c.moveTo(-6 + i * 4, -7 + i * 2); c.lineTo(-1 + i * 4, -4 + i * 2); c.stroke(); }
+    c.restore(); return;
+  }
+  if (a.x === 'can') {
+    c.fillStyle = '#9a6b3f'; c.fillRect(-14, -15, 28, 30); c.fillStyle = '#6e4a2a'; c.fillRect(-14, -15, 28, 5); c.fillRect(-14, 10, 28, 5);
+    c.fillStyle = '#c9a074'; c.fillRect(-14, -4, 28, 9); c.restore(); return;
+  }
+  if (a.x === 'weed') {
+    c.strokeStyle = '#2f9e5b'; c.lineWidth = 4;
+    for (let i = -2; i <= 2; i++) { c.beginPath(); c.moveTo(i * 7, 20); c.bezierCurveTo(i * 7 + 9, 6, i * 7 - 9, -6, i * 7 + w, -22 + Math.abs(i) * 3); c.stroke(); }
+    c.restore(); return;
+  }
+  if (a.x === 'ray') {
+    c.strokeStyle = a.f; c.lineWidth = 3; c.beginPath(); c.moveTo(-24, 0); c.quadraticCurveTo(-40, w, -60, w * 2); c.stroke();
+    c.fillStyle = a.c; c.beginPath(); c.moveTo(32, 0); c.quadraticCurveTo(14, -36 + w, -20, -9); c.lineTo(-26, 0); c.lineTo(-20, 9); c.quadraticCurveTo(14, 36 - w, 32, 0); c.fill();
+    c.fillStyle = a.b; for (let i = 0; i < 5; i++) { c.beginPath(); c.arc(-8 + i * 7, (i % 2 ? 9 : -9), 2, 0, 7); c.fill(); }
+    c.fillStyle = '#fff'; c.beginPath(); c.arc(20, -6, 3.5, 0, 7); c.arc(20, 6, 3.5, 0, 7); c.fill();
+    c.fillStyle = '#111'; c.beginPath(); c.arc(21, -6, 1.8, 0, 7); c.arc(21, 6, 1.8, 0, 7); c.fill();
+    c.restore(); return;
+  }
+
+  const L = a.L, H = a.H, hx = L / 2, shark = a.x === 'shark';
+  const body = () => {
+    c.beginPath();
+    if (shark) { c.moveTo(hx + 5, 3); c.quadraticCurveTo(hx * .2, -H * .62, -hx, -H * .12); c.lineTo(-hx, H * .12); c.quadraticCurveTo(hx * .2, H * .55, hx + 5, 3); }
+    else c.ellipse(0, 0, hx, H / 2, 0, 0, 7);
+  };
+  // ekor
+  c.fillStyle = a.f; c.beginPath();
+  if (shark) { c.moveTo(-hx + 4, 0); c.lineTo(-hx - 16, -H * 1.05 + w); c.lineTo(-hx - 7, w * .3); c.lineTo(-hx - 11, H * .55 + w); }
+  else if (a.tail === 'fork') { c.moveTo(-hx + 6, 0); c.lineTo(-hx - H * .75, -H * .75 + w); c.lineTo(-hx - H * .4, w * .5); c.lineTo(-hx - H * .75, H * .75 + w); }
+  else { c.moveTo(-hx + 6, 0); c.quadraticCurveTo(-hx - H * .6, -H * .95 + w, -hx - H * .9, w); c.quadraticCurveTo(-hx - H * .6, H * .95 + w, -hx + 6, 0); }
+  c.closePath(); c.fill();
+  // sirip
+  c.fillStyle = a.f;
+  if (shark) tri(-hx * .1, -H * .42, -hx * .35, -H * 1.35, -hx * .62, -H * .3);
+  else tri(hx * .1, -H / 2 + 2, -hx * .3, -H * .98, -hx * .7, -H / 2 + 5);
+  tri(-hx * .05, H / 2 - 2, -hx * .4, H * .85, -hx * .55, H / 2 - 4);
+  if (a.x === 'spiky') for (let i = 0; i < 4; i++) tri(hx * .2 - i * 8, -H / 2 + 3, hx * .2 - i * 8 - 4, -H / 2 - 8, hx * .2 - i * 8 - 8, -H / 2 + 4);
+  if (a.x === 'finlets') { c.fillStyle = '#f2c94c'; for (let i = 0; i < 4; i++) { const x = -hx * .55 - i * 5; tri(x, -H / 2 + 4, x - 3, -H / 2 - 4, x - 6, -H / 2 + 5); tri(x, H / 2 - 4, x - 3, H / 2 + 4, x - 6, H / 2 - 5); } }
+  // badan + perut + pola
+  c.fillStyle = a.c; body(); c.fill();
+  c.save(); body(); c.clip();
+  c.fillStyle = a.b; c.fillRect(-hx - 6, H * .12, L + 14, H);
+  c.fillStyle = a.pc || a.f; c.strokeStyle = a.pc || a.f;
+  if (a.pat === 'stripes') { c.globalAlpha = .55; for (let i = 0; i < 4; i++) c.fillRect(-hx * .45 + i * L * .17, -H, 4, H * 2); }
+  else if (a.pat === 'line') c.fillRect(-hx, -H * .04, L, H * .13);
+  else if (a.pat === 'spots') for (let i = 0; i < 6; i++) { c.beginPath(); c.arc(-hx * .5 + i * L * .13, -H * .15 + (i % 2) * H * .22, 2, 0, 7); c.fill(); }
+  else if (a.pat === 'scales') { c.globalAlpha = .45; c.lineWidth = 1; for (let y = -H * .3; y < H * .45; y += 7) for (let x = -hx * .6 + ((Math.round(y / 7) & 1) * 3.5); x < hx * .75; x += 7) { c.beginPath(); c.arc(x, y, 4, Math.PI * .55, Math.PI * 1.45); c.stroke(); } }
+  c.globalAlpha = 1; c.fillStyle = 'rgba(255,255,255,.28)'; c.beginPath(); c.ellipse(hx * .1, -H * .25, hx * .6, H * .12, 0, 0, 7); c.fill();
+  c.restore();
+  // sirip dada
+  c.fillStyle = a.f; c.beginPath(); c.ellipse(hx * .2, H * .2, 7, 3, .6, 0, 7); c.fill();
+  // insang hiu
+  if (shark) { c.strokeStyle = 'rgba(0,0,0,.3)'; c.lineWidth = 1.2; for (let i = 0; i < 3; i++) { c.beginPath(); c.moveTo(hx * .3 - i * 3, -H * .25); c.lineTo(hx * .3 - i * 3 - 1, H * .15); c.stroke(); } }
+  // mata
+  const er = Math.max(3, H * .16);
+  c.fillStyle = '#fff'; c.beginPath(); c.arc(hx - 10, -H * .14, er, 0, 7); c.fill();
+  c.fillStyle = '#111'; c.beginPath(); c.arc(hx - 9, -H * .14, er * .55, 0, 7); c.fill();
+  // sungut, tanduk, dll
+  if (a.x === 'whisker') { c.strokeStyle = '#26221b'; c.lineWidth = 1.6; for (const k of [1, .6]) for (const sg of [-1, 1]) { c.beginPath(); c.moveTo(hx - 3, H * .12); c.quadraticCurveTo(hx + 8 * k, H * .12 + sg * 6 * k, hx + 15 * k, H * .12 + sg * 12 * k + w * .3); c.stroke(); } }
+  if (a.x === 'feeler') { c.strokeStyle = a.f; c.lineWidth = 1.5; c.beginPath(); c.moveTo(hx * .2, H / 2 - 2); c.quadraticCurveTo(hx * .2 - 4, H / 2 + 14, -hx * .3 + w * .3, H / 2 + 17); c.stroke(); }
+  if (a.x === 'dragon') {
+    c.strokeStyle = '#ffd34d'; c.lineWidth = 1.8;
+    for (const sg of [-1, 1]) { c.beginPath(); c.moveTo(hx - 2, sg * 3); c.bezierCurveTo(hx + 10, sg * 14, hx + 18, sg * 2, hx + 28, sg * 14 + w * .5); c.stroke(); }
+    c.fillStyle = '#ff6a00'; tri(hx - 16, -H / 2 + 2, hx - 23, -H / 2 - 13, hx - 9, -H / 2 + 1); tri(hx - 26, -H / 2 + 5, hx - 34, -H / 2 - 9, hx - 20, -H / 2 + 3);
+  }
+  c.restore();
+}
+
+// Kartu hasil tangkapan
+function drawCard() {
+  const f = card.fish, col = RARITY_COLORS[f.rarity], age = 3.6 - card.t, sc = 1 + Math.max(0, .35 - age) * 1.5;
+  const k = ['Common', 'Uncommon', 'Rare', 'Epic', 'Legendary'].indexOf(f.rarity);
+  ctx.save(); ctx.globalAlpha = Math.min(1, card.t / .6); ctx.translate(W / 2, 235); ctx.scale(sc, sc);
+  ctx.fillStyle = 'rgba(8,16,36,.9)'; ctx.fillRect(-130, -105, 260, 215);
+  ctx.strokeStyle = col; ctx.lineWidth = 3; ctx.strokeRect(-130, -105, 260, 215);
+  ctx.save(); ctx.translate(0, -28 + Math.sin(clock * 2) * 3); ctx.shadowColor = col; ctx.shadowBlur = 25; drawFish(ctx, f.name, 130, clock); ctx.restore();
+  ctx.textAlign = 'center'; ctx.fillStyle = '#fff'; ctx.font = 'bold 22px sans-serif'; ctx.fillText(f.name, 0, 50);
+  ctx.fillStyle = col; ctx.font = 'bold 14px sans-serif'; ctx.fillText(`${f.rarity}  ${'★'.repeat(k + 1)}  ·  🪙 ${f.price}`, 0, 72);
+  if (card.isNew) { ctx.fillStyle = '#ffd23c'; ctx.fillText('✨ BARU! Masuk ke Koleksi', 0, 96); }
+  ctx.restore();
+}
+
+// Menu koleksi (index ikan)
+function renderDex() {
+  const grid = $('dexGrid'); grid.innerHTML = ''; let got = 0;
+  FISH.forEach(f => {
+    const n = save.dex[f.name] || 0; if (n) got++;
+    const el = document.createElement('div'); el.className = 'dcard'; el.style.borderColor = n ? RARITY_COLORS[f.rarity] : '#334';
+    const cvs = document.createElement('canvas'); cvs.width = 320; cvs.height = 200;
+    const c = cvs.getContext('2d'); c.translate(160, 100); drawFish(c, f.name, 150, 0);
+    if (!n) { c.setTransform(1, 0, 0, 1, 0, 0); c.globalCompositeOperation = 'source-atop'; c.fillStyle = '#0b1220'; c.fillRect(0, 0, 320, 200); }
+    el.appendChild(cvs);
+    el.insertAdjacentHTML('beforeend', n
+      ? `<b>${f.name}</b><span style="color:${RARITY_COLORS[f.rarity]}">${f.rarity}</span><small>🪙 ${f.price} · Tertangkap ${n}×</small>`
+      : `<b>???</b><span style="color:#667">${f.rarity}</span><small>Belum tertangkap</small>`);
+    grid.appendChild(el);
+  });
+  $('dexCount').textContent = `${got}/${FISH.length}`;
+}
+function toggleDex(open) { dexOpen = open; $('dex').classList.toggle('on', open); if (open) { holding = false; renderDex(); } }
+$('dexBtn').onclick = () => toggleDex(true);
+$('dexClose').onclick = () => toggleDex(false);
+addEventListener('keydown', e => { if (e.code === 'Escape' && dexOpen) toggleDex(false); });
+
+// ===================== MINIGAME MENARIK IKAN =====================
+// Tingkat kesulitan minigame per rarity
+// speed: kecepatan ikan | ivl: jeda ganti arah (detik) | wobble: getaran | dash: peluang ngebut mendadak
+// bar: pengali ukuran bar hijau | gain/drain: laju progres naik/turun | time: batas waktu | start: progres awal
+const FIGHT = {
+  Junk:      { label: 'Sangat Mudah', stars: 1, speed: .18, ivl: [1.2, 2.2], wobble: 0,    dash: 0,   bar: 1.25, gain: .34, drain: .10, time: 30, start: .40 },
+  Common:    { label: 'Mudah',        stars: 1, speed: .25, ivl: [.9, 1.8],  wobble: 0,    dash: 0,   bar: 1.1,  gain: .30, drain: .12, time: 30, start: .35 },
+  Uncommon:  { label: 'Sedang',       stars: 2, speed: .38, ivl: [.7, 1.5],  wobble: 0,    dash: 0,   bar: 1,    gain: .27, drain: .16, time: 28, start: .30 },
+  Rare:      { label: 'Sulit',        stars: 3, speed: .50, ivl: [.55, 1.2], wobble: .003, dash: .10, bar: .92,  gain: .26, drain: .19, time: 26, start: .30 },
+  Epic:      { label: 'Sangat Sulit', stars: 4, speed: .58, ivl: [.5, 1.1],  wobble: .004, dash: .20, bar: .88,  gain: .25, drain: .20, time: 26, start: .30 },
+  Legendary: { label: 'Legendaris',   stars: 5, speed: .66, ivl: [.4, .9],   wobble: .005, dash: .30, bar: .85,  gain: .24, drain: .22, time: 28, start: .30 },
+};
+let fight = null, holding = false;
+const barH = () => (.22 + .02 * save.level) * (fight ? fight.cfg.bar : 1);
+
+function startFight() {
+  current = pickFish();
+  const cfg = FIGHT[current.junk ? 'Junk' : current.rarity];
+  fight = { cfg, fp: .5, target: .5, t: 1, bp: .3, bv: 0, prog: cfg.start, time: 0, boost: 1 };
+  mode = 'fight'; tm = 0; shake = 3; sfx(600, .12, 'square', .05); refreshUI();
+  setStatus(`${current.junk ? 'Sampah' : current.rarity} - Kesulitan: ${cfg.label}. Tahan klik/Spasi agar bar hijau naik!`);
+}
+
+function updateFight(dt) {
+  const f = fight, c = f.cfg, bh = barH();
+  f.time += dt; f.t -= dt;
+  if (f.t <= 0) {
+    f.target = rnd(.08, .92); f.t = rnd(c.ivl[0], c.ivl[1]);
+    f.boost = Math.random() < c.dash ? 2.2 : 1; // ikan sesekali ngebut
+  }
+  const sp = c.speed * f.boost, dl = f.target - f.fp;
+  f.fp += Math.max(-sp * dt, Math.min(sp * dt, dl));
+  f.fp = Math.max(.04, Math.min(.96, f.fp + Math.sin(clock * 9) * c.wobble));
+  f.bv = Math.max(-1.1, Math.min(1.1, f.bv + (holding ? 2.6 : -2.2) * dt));
+  f.bp += f.bv * dt;
+  if (f.bp < 0) { f.bp = 0; f.bv = 0; }
+  if (f.bp > 1 - bh) { f.bp = 1 - bh; f.bv = 0; }
+  const inZone = f.fp >= f.bp && f.fp <= f.bp + bh;
+  f.prog += (inZone ? c.gain + .01 * save.level : -c.drain) * dt;
+  if (Math.random() < dt * 10) spawn(TARGET.x + rnd(-10, 10), TARGET.y + 4, 2, '#cfeeff', 'splash');
+  if (f.prog >= 1) winFight();
+  else if (f.prog <= 0 || f.time > c.time) fail('Ikannya lepas dari kail!');
+}
+
+function winFight() {
+  save.coins += current.price;
+  newCatch = false;
+  if (!current.junk) { save.caught++; newCatch = !save.dex[current.name]; save.dex[current.name] = (save.dex[current.name] || 0) + 1; }
+  persist();
+  mode = 'jumping'; jumpT = 0; shake = 6;
+  spawn(TARGET.x, TARGET.y, 18, '#bfe9ff', 'splash'); sfx(300, .2, 'triangle', .08, 400);
+  refreshUI();
+}
+
+function drawFight() {
+  const f = fight, X = 700, Y = 80, Hh = 300, bh = barH();
+  const inZone = f.fp >= f.bp && f.fp <= f.bp + bh;
+  ctx.save();
+  ctx.fillStyle = 'rgba(0,0,0,.5)'; ctx.fillRect(X - 8, Y - 8, 66, Hh + 50);
+  ctx.fillStyle = 'rgba(255,255,255,.15)'; ctx.fillRect(X, Y, 34, Hh);
+  ctx.fillStyle = inZone ? 'rgba(90,230,120,.9)' : 'rgba(90,230,120,.45)';
+  ctx.fillRect(X, Y + Hh * (1 - f.bp - bh), 34, Hh * bh);
+  ctx.shadowColor = current.junk ? '#999' : RARITY_COLORS[current.rarity]; ctx.shadowBlur = 14;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.save(); ctx.translate(X + 17, Y + Hh * (1 - f.fp)); drawFish(ctx, current.name, 34, clock); ctx.restore();
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = 'rgba(255,255,255,.15)'; ctx.fillRect(X + 40, Y, 10, Hh);
+  ctx.fillStyle = f.prog > .66 ? '#5adc6e' : f.prog > .33 ? '#ffd23c' : '#ff6e6e';
+  ctx.fillRect(X + 40, Y + Hh * (1 - f.prog), 10, Hh * f.prog);
+  if (f.time < 3) { ctx.fillStyle = '#fff'; ctx.font = 'bold 14px sans-serif'; ctx.fillText('⬆ TAHAN', X + 25, Y - 18); }
+  const col = current.junk ? '#bbb' : RARITY_COLORS[current.rarity];
+  ctx.fillStyle = col; ctx.font = 'bold 12px sans-serif'; ctx.fillText('★'.repeat(f.cfg.stars) + '☆'.repeat(5 - f.cfg.stars), X + 25, Y + Hh + 12);
+  ctx.font = '10px sans-serif'; ctx.fillText(f.cfg.label, X + 25, Y + Hh + 26);
+  ctx.restore();
+}
+
+$('mute').onclick = () => { muted = !muted; $('mute').textContent = muted ? '🔇' : '🔊'; };
+document.querySelectorAll('button').forEach(b => b.addEventListener('click', () => b.blur()));
+
+// ===================== LOOP & INPUT =====================
+let last = performance.now();
+function loop(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  if (!dexOpen) { update(dt); draw(); }
+  requestAnimationFrame(loop);
+}
+
+$('act').addEventListener('click', action);
+cv.addEventListener('pointerdown', action);
+$('up').addEventListener('click', buyUpgrade);
+addEventListener('pointerdown', () => { if (mode === 'fight') holding = true; }, true);
+addEventListener('pointerup', () => { holding = false; });
+addEventListener('pointercancel', () => { holding = false; });
+addEventListener('blur', () => { holding = false; });
+addEventListener('keydown', e => {
+  if (e.code === 'Space' || e.code === 'KeyE') {
+    e.preventDefault();
+    if (dexOpen) return;
+    if (mode === 'fight') holding = true; else if (!e.repeat) action();
+  }
+});
+addEventListener('keyup', e => { if (e.code === 'Space' || e.code === 'KeyE') holding = false; });
+
+refreshUI();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
